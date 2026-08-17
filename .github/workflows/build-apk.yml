@@ -21,15 +21,23 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        id: install
+        shell: bash
+        run: set -o pipefail; npm install 2>&1 | tee /tmp/log-install.txt
+        continue-on-error: true
 
       - name: Build web api bundle
-        run: npx esbuild src-mobile/api.js --bundle --format=iife --platform=browser --outfile=www/api.js
+        id: bundle
+        if: steps.install.outcome == 'success'
+        shell: bash
+        run: set -o pipefail; npx esbuild src-mobile/api.js --bundle --format=iife --platform=browser --outfile=www/api.js 2>&1 | tee /tmp/log-bundle.txt
+        continue-on-error: true
 
       - name: Sync Capacitor Android project
         id: sync
+        if: steps.install.outcome == 'success'
         shell: bash
-        run: set -o pipefail; npx cap sync android 2>&1 | tee sync-log.txt
+        run: set -o pipefail; npx cap sync android 2>&1 | tee /tmp/log-sync.txt
         continue-on-error: true
 
       - name: Setup JDK 17
@@ -48,20 +56,8 @@ jobs:
         if: steps.sync.outcome == 'success'
         working-directory: android
         shell: bash
-        run: set -o pipefail; ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee ../gradle-log.txt
+        run: set -o pipefail; ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/log-gradle.txt
         continue-on-error: true
-
-      - name: Publicar log de diagnóstico (se algo falhar)
-        if: steps.sync.outcome == 'failure' || steps.gradlebuild.outcome == 'failure'
-        run: |
-          git config user.email "build@controledemontagens.local"
-          git config user.name "Controle de Montagens Build"
-          git checkout -B debug-log
-          [ -f sync-log.txt ] && git add -f sync-log.txt || true
-          [ -f gradle-log.txt ] && git add -f gradle-log.txt || true
-          git commit -m "debug: logs (run ${{ github.run_number }})"
-          git push -f origin debug-log
-          exit 1
 
       - name: Rename APK
         if: steps.gradlebuild.outcome == 'success'
@@ -73,9 +69,34 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: "Build #${{ github.run_number }}"
-          body: "APK gerado automaticamente para teste. Instale direto no Android (pode ser necessário permitir 'fontes desconhecidas')."
+          body: "APK gerado automaticamente para teste."
           files: ControleDeMontagens-debug.apk
 
-      - name: Falhar job se o build não deu certo
-        if: steps.sync.outcome == 'failure' || steps.gradlebuild.outcome == 'failure'
+      - name: Publicar logs via API (sempre)
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN_API: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in /tmp/log-install.txt /tmp/log-bundle.txt /tmp/log-sync.txt /tmp/log-gradle.txt; do
+            name=$(basename "$f")
+            if [ -f "$f" ]; then
+              existing_sha=$(curl -s -H "Authorization: token $GH_TOKEN_API" "https://api.github.com/repos/${{ github.repository }}/contents/debug-logs/$name" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).sha||'')}catch(e){console.log('')}})")
+              node -e "
+                const fs=require('fs');
+                const content=fs.readFileSync('$f','utf-8');
+                const payload={message:'debug logs run ${{ github.run_number }}', content: Buffer.from(content).toString('base64')};
+                const sha='$existing_sha';
+                if (sha) payload.sha = sha;
+                fs.writeFileSync('/tmp/payload.json', JSON.stringify(payload));
+              "
+              curl -s -X PUT -H "Authorization: token $GH_TOKEN_API" -H "Content-Type: application/json" \
+                "https://api.github.com/repos/${{ github.repository }}/contents/debug-logs/$name" \
+                -d @/tmp/payload.json -o /tmp/put-response-$name.json
+              echo "Publicado: debug-logs/$name"
+            fi
+          done
+
+      - name: Falhar job se algo deu errado
+        if: steps.install.outcome == 'failure' || steps.bundle.outcome == 'failure' || steps.sync.outcome == 'failure' || steps.gradlebuild.outcome == 'failure'
         run: exit 1

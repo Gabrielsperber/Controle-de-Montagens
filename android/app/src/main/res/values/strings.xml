@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Controle de Montagens</string>
+    <string name="title_activity_main">Controle de Montagens</string>
+    <string name="package_name">com.gabrielsperber.controledemontagens</string>
+    <string name="custom_url_scheme">com.gabrielsperber.controledemontagens</string>
+</resources>
